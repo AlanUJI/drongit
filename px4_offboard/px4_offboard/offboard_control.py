@@ -61,12 +61,12 @@ class OffboardControl(Node): # creamos nuestro nodo central de mando
 
     def publish_trajectory_setpoint(self): # empaqueta la coordenada a la que queremos viajar
         msg = TrajectorySetpoint()
-        # usamos target_x y target_y en lugar de 0.0 absoluto para que el punto cero sea donde esta apoyado ahora mismo
-        msg.position = [self.target_x, self.target_y, -0.5] # el objetivo final (medio metro hacia arriba)
+        # usamos target_x y target_y convirtiendolos explicitamente a float de python para evitar el AssertionError
+        msg.position = [float(self.target_x), float(self.target_y), -0.5] # el objetivo final (medio metro hacia arriba)
         msg.yaw = 0.0 # yaw a 0 para que no gire sobre si mismo
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
-
+        
     def publish_vehicle_command(self, command, **params): # plantilla general para enviarle comandos fuertes (mavlink) al dron
         msg = VehicleCommand()
         msg.command = command
