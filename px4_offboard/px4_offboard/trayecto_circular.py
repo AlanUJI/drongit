@@ -2,6 +2,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
+import time
+import math # ¡Librería matemática para Seno y Coseno!
 
 class OffboardControl(Node):
     def __init__(self):
@@ -29,10 +31,15 @@ class OffboardControl(Node):
         
         self.target_x = 0.0
         self.target_y = 0.0
-        self.target_z = 0.0
+        self.target_z = -1.0 # Volaremos a 1 metro de altura
+        self.target_yaw = 0.0
+
+        # VARIABLES DEL CÍRCULO
+        self.radio = 2.0 # Radio de 2 metros
+        self.velocidad_angular = 0.5 # Velocidad de giro
+        self.tiempo_inicio = 0.0
 
         self.counter = 0     
-        self.hover_ticks = 0 
         self.fase_vuelo = 0  
 
         self.timer = self.create_timer(0.1, self.timer_callback)
@@ -57,9 +64,8 @@ class OffboardControl(Node):
 
     def publish_trajectory_setpoint(self):
         msg = TrajectorySetpoint()
-        # Usamos los targets fijados en el aire
         msg.position = [float(self.target_x), float(self.target_y), float(self.target_z)] 
-        msg.yaw = 0.0 
+        msg.yaw = float(self.target_yaw)
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
 
@@ -76,45 +82,49 @@ class OffboardControl(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher_.publish(msg)
 
+    def arm(self):
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
+        self.get_logger().info('¡ARMANDO MOTORES!')
+
     def engage_offboard_mode(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
-        self.get_logger().info('¡TOMANDO EL CONTROL EN EL AIRE! (Subiendo 0.5m extra)')
+        self.get_logger().info('¡MODO OFFBOARD ACTIVADO! (Comenzando círculo...)')
 
     def land(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-        self.get_logger().info('¡MANIOBRA TERMINADA! Aterrizando de forma segura...')
+        self.get_logger().info('¡TIEMPO AGOTADO! Aterrizando...')
 
     def timer_callback(self):
         self.publish_offboard_control_mode()
         self.publish_trajectory_setpoint()
 
         if self.fase_vuelo == 0:
-            # Mientras esperamos, copiamos la posición donde tienes el dron flotando
-            self.target_x = self.current_x
-            self.target_y = self.current_y
-            # Calculamos la altura objetivo (medio metro más alto de donde esté ahora mismo)
-            self.target_z = self.current_z - 0.5
-
-            if self.counter == 30: # Esperamos 3 segundos antes de quitarte el control
+            if self.counter == 50:
                 self.engage_offboard_mode()
-                # ¡HEMOS QUITADO EL self.arm() PORQUE YA ESTÁ VOLANDO!
+                self.arm()
+                self.tiempo_inicio = time.time() # ¡Arrancamos el cronómetro!
                 self.fase_vuelo = 1 
             else:
                 self.counter += 1
 
         elif self.fase_vuelo == 1:
-            distancia_al_objetivo = abs(self.current_z - self.target_z)
+            tiempo_actual = time.time() - self.tiempo_inicio
             
-            if distancia_al_objetivo < 0.1:
-                self.get_logger().info('¡Altura objetivo alcanzada! Manteniendo posición...')
+            # Matemáticas en tiempo real para hacer el círculo
+            self.target_x = self.radio * math.cos(self.velocidad_angular * tiempo_actual)
+            self.target_y = self.radio * math.sin(self.velocidad_angular * tiempo_actual)
+            self.target_z = -1.0 
+            
+            # Giramos el dron para que mire hacia adelante (la tangente del círculo)
+            self.target_yaw = (self.velocidad_angular * tiempo_actual) + (math.pi / 2.0)
+
+            # Volamos en círculo durante 20 segundos
+            if tiempo_actual > 20.0:
                 self.fase_vuelo = 2 
                 
         elif self.fase_vuelo == 2:
-            if self.hover_ticks == 30:
-                self.land()
-                self.fase_vuelo = 3 
-            else:
-                self.hover_ticks += 1
+            self.land()
+            self.fase_vuelo = 3
 
 def main(args=None):
     rclpy.init(args=args)
