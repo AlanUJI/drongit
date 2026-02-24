@@ -25,7 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'control = px4_offboard.offboard_control:main',
-            'circulo = px4_offboard.trayecto_circular:main',
+            'ocho = px4_offboard.trayecto_ocho:main',
             'cuadrado = px4_offboard.waypoints_cuadrado:main',
         ],
     },
