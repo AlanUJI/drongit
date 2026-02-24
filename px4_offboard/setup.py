@@ -28,7 +28,7 @@ setup(
             'ocho = px4_offboard.trayecto_ocho:main',
             'cuadrado = px4_offboard.waypoints_cuadrado:main',
             'aterrizaje = px4_offboard.aterrizaje:main',
-            'ocho_suave = px4_offboard.ocho_suave:main',
+            'ocho_suave = px4_offboard.trayecto_ocho_suave:main',
         ],
     },
 )
