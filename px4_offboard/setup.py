@@ -27,6 +27,7 @@ setup(
             'control = px4_offboard.offboard_control:main',
             'ocho = px4_offboard.trayecto_ocho:main',
             'cuadrado = px4_offboard.waypoints_cuadrado:main',
+            'aterrizaje = px4_offboard.aterrizaje:main',
         ],
     },
 )
