@@ -31,6 +31,7 @@ setup(
             'returnth = px4_offboard.return_to_home:main',
             'ocho_suave = px4_offboard.trayecto_ocho_suave:main',
             'voxl_offboard_figure8 = px4_offboard.voxl_offboard_figure8:main',
+            'despegue = px4_offboard.despegue_normal:main',
         ],
     },
 )
