@@ -3,7 +3,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
-import time
 
 class AterrizajePerfecto(Node):
     def __init__(self):
@@ -24,31 +23,36 @@ class AterrizajePerfecto(Node):
         self.odom_sub = self.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.odom_callback, qos_profile)
 
         self.nav_state = 0
+        # Variables para leer odometría
+        self.current_x = 0.0
+        self.current_y = 0.0
         self.current_z = 0.0
+        
+        # Variables para congelar la posición y bajar vertical
+        self.lock_x = 0.0
+        self.lock_y = 0.0
         self.target_z = 0.0
+        
         self.odom_received = False
         self.is_landing = False
         self.landed_confirmed = False
 
-        # --- Variables para superar el Efecto Suelo ---
-        self.stuck_timer_start = 0.0
-        self.stuck_altitude_memory = 0.0
-        self.stuck_tolerance = 0.05 # 5 centímetros de margen de movimiento
-
         self.timer = self.create_timer(0.1, self.timer_callback)
-        self.get_logger().info('Nodo de aterrizaje anti-Efecto-Suelo listo.')
+        self.get_logger().info('Nodo de aterrizaje vertical y modo NAV_LAND listo.')
 
     def vehicle_status_callback(self, msg):
         self.nav_state = msg.nav_state
 
     def odom_callback(self, msg):
-        self.current_z = float(msg.position[2]) 
+        self.current_x = float(msg.position[0])
+        self.current_y = float(msg.position[1])
+        self.current_z = float(msg.position[2])
         self.odom_received = True
 
-    def disarm(self):
+    def trigger_auto_land(self):
+        """Activa el modo de aterrizaje interno de PX4 para el toque final"""
         msg = VehicleCommand()
-        msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
-        msg.param1 = float(0.0)  
+        msg.command = VehicleCommand.VEHICLE_CMD_NAV_LAND
         msg.target_system = 1
         msg.target_component = 1
         msg.source_system = 1
@@ -56,7 +60,7 @@ class AterrizajePerfecto(Node):
         msg.from_external = True
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher_.publish(msg)
-        self.get_logger().info('¡CORTANDO MOTORES (Efecto Suelo Superado)!')
+        self.get_logger().info('¡Colchón de aire alcanzado! Modo NAV_LAND activado. PX4 asume el contacto y desarme.')
 
     def timer_callback(self):
         if not self.odom_received:
@@ -64,50 +68,36 @@ class AterrizajePerfecto(Node):
 
         self.publish_offboard_control_mode()
 
-        if self.nav_state != 14:
+        if self.nav_state != 14: # Si no estamos en Offboard
+            # Actualizamos constantemente la altura y posición "congelada" para no pegar tirones al activarlo
             self.target_z = self.current_z
+            self.lock_x = self.current_x
+            self.lock_y = self.current_y
             self.is_landing = False
             return
 
         if not self.is_landing:
-            self.get_logger().info('Descenso activado...')
+            self.get_logger().info('Iniciando descenso vertical en el sitio exacto...')
             self.is_landing = True
-            self.stuck_timer_start = time.time()
-            self.stuck_altitude_memory = self.current_z
+            # AL EMPEZAR A ATERRIZAR, BLOQUEAMOS LAS COORDENADAS X e Y ACTUALES
+            self.lock_x = self.current_x
+            self.lock_y = self.current_y
 
-        # --- LÓGICA DE DESCENSO SEGÚN ALTURA ---
+        # Si ya hemos mandado el comando final, no hacemos nada más
+        if self.landed_confirmed:
+            return 
+
+        # --- LÓGICA DE DESCENSO ---
         
-        # 1. Descenso Normal (si estamos a más de 40cm)
-        if self.current_z < -0.40:
+        # Descenso Offboard suave hasta estar a 30 centímetros del suelo
+        if self.current_z < -0.30:
             self.target_z += 0.02  # Baja 20cm por segundo
-            self.stuck_timer_start = time.time() # Reseteamos timer porque baja bien
-            self.stuck_altitude_memory = self.current_z
-        
-        # 2. Descenso de precisión (entre 40cm y 10cm)
-        elif self.current_z < -0.10:
-            self.target_z += 0.005 # Baja 5cm por segundo
+            self.publish_trajectory_setpoint()
             
-            # --- DETECTOR DE "ATASCO" POR EFECTO SUELO ---
-            # Si el dron apenas ha cambiado de altura respecto a nuestra memoria...
-            if abs(self.current_z - self.stuck_altitude_memory) < self.stuck_tolerance:
-                tiempo_atascado = time.time() - self.stuck_timer_start
-                if tiempo_atascado > 3.0: # Si lleva 3 segundos atascado en la burbuja de aire
-                    self.get_logger().warn('¡Efecto suelo detectado! Forzando aterrizaje y desarme.')
-                    if not self.landed_confirmed:
-                        self.disarm()
-                        self.landed_confirmed = True
-            else:
-                # Si se ha movido más de 5cm, reseteamos el detector de atasco
-                self.stuck_timer_start = time.time()
-                self.stuck_altitude_memory = self.current_z
-        
-        # 3. Apagado natural (si logra superar el colchón y llega a menos de 10cm)
+        # Cuando llegamos a la capa crítica (menos de 30 cm)
         else:
-            if not self.landed_confirmed:
-                self.disarm()
-                self.landed_confirmed = True
-
-        self.publish_trajectory_setpoint()
+            self.trigger_auto_land()
+            self.landed_confirmed = True
 
     def publish_offboard_control_mode(self):
         msg = OffboardControlMode()
@@ -117,7 +107,8 @@ class AterrizajePerfecto(Node):
 
     def publish_trajectory_setpoint(self):
         msg = TrajectorySetpoint()
-        msg.position = [float(0.0), float(0.0), float(self.target_z)]
+        # MANTENEMOS X e Y CONGELADAS PARA QUE BAJE RECTO
+        msg.position = [float(self.lock_x), float(self.lock_y), float(self.target_z)]
         msg.yaw = float("nan")
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
