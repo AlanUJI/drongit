@@ -29,7 +29,7 @@ setup(
             'cuadrado = px4_offboard.waypoints_cuadrado:main',
             'aterrizaje = px4_offboard.aterrizaje:main',
             'ocho_suave = px4_offboard.trayecto_ocho_suave:main',
-            'voxl_offboard_figure8 = voxl_offboard_figure8.voxl_offboard_figure8:main',
+            'voxl_offboard_figure8 = px4_offboard.voxl_offboard_figure8:main',
         ],
     },
 )
