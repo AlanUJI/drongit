@@ -26,7 +26,7 @@ class OchoHibrido(Node):
         self.odom_sub = self.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.odom_callback, qos_profile)
 
         # Configuración del Ocho Matemático Oficial
-        self.rate = 20  # 20 Hz (garantiza fluidez total)
+        self.rate = 20  # 20 Hz
         self.radius = 1.0
         self.cycle_s = 8.0
         self.target_altitude = -1.5 # Z negativo es hacia arriba
@@ -79,13 +79,13 @@ class OchoHibrido(Node):
             dx = -(r * c * s) / sspo
             dy = (r * c) / sspo
             
-            # MAGIA: Anclamos las matemáticas a nuestro punto de despegue real
-            msg.position = [self.home_x + dx, self.home_y + dy, self.target_altitude]
+            # MAGIA: Anclamos las matemáticas a nuestro punto de despegue real (con float forzado)
+            msg.position = [float(self.home_x + dx), float(self.home_y + dy), float(self.target_altitude)]
             
-            # Feed-forward para no perder inercia
-            msg.velocity = [dadt * r * (ss * ss + ss + ssmo * cc) / sspos, -dadt * r * s * (ss + 2.0 * cc + 1.0) / sspos, 0.0]
-            msg.acceleration = [-dadt * dadt * 8.0 * r * s * c * ((3.0 * c2a) + 7.0) / c2am3_cubed, dadt * dadt * r * c * ((44.0 * c2a) + c4a - 21.0) / c2am3_cubed, 0.0]
-            msg.yaw = math.atan2(msg.velocity[1], msg.velocity[0])
+            # Feed-forward para no perder inercia (con float forzado)
+            msg.velocity = [float(dadt * r * (ss * ss + ss + ssmo * cc) / sspos), float(-dadt * r * s * (ss + 2.0 * cc + 1.0) / sspos), float(0.0)]
+            msg.acceleration = [float(-dadt * dadt * 8.0 * r * s * c * ((3.0 * c2a) + 7.0) / c2am3_cubed), float(dadt * dadt * r * c * ((44.0 * c2a) + c4a - 21.0) / c2am3_cubed), float(0.0)]
+            msg.yaw = float(math.atan2(msg.velocity[1], msg.velocity[0]))
 
             self.path.append(msg)
 
@@ -98,23 +98,22 @@ class OchoHibrido(Node):
     def publish_vehicle_command(self, command, **params):
         msg = VehicleCommand()
         msg.command = command
-        msg.param1 = params.get("param1", 0.0)
-        msg.param2 = params.get("param2", 0.0)
+        msg.param1 = float(params.get("param1", 0.0))
+        msg.param2 = float(params.get("param2", 0.0))
         msg.target_system = msg.target_component = msg.source_system = msg.source_component = 1
         msg.from_external = True
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher_.publish(msg)
 
     def timer_callback(self):
-        # 1. BLOQUEO DE SEGURIDAD: Si no hay cámara, no hacemos nada.
+        # 1. BLOQUEO DE SEGURIDAD
         if not self.odom_received:
             return
 
-        # 2. SEÑAL DE VIDA: Obligatorio enviar esto a más de 2Hz para evitar RTL
+        # 2. SEÑAL DE VIDA
         self.publish_offboard_control_mode()
 
         if self.fase_vuelo == 0:
-            # Fijamos el Home exactamente donde ha leído la cámara
             self.home_x = self.current_x
             self.home_y = self.current_y
             self.home_z = self.current_z
@@ -124,16 +123,15 @@ class OchoHibrido(Node):
             self.fase_vuelo = 1
 
         elif self.fase_vuelo == 1:
-            # Para que PX4 nos deje armar, tenemos que enviarle primero 
-            # unos cuantos setpoints al punto EXACTO donde estamos apoyados.
+            # Enviamos el punto EXACTO envuelto en float()
             msg = TrajectorySetpoint()
-            msg.position = [self.home_x, self.home_y, self.current_z]
+            msg.position = [float(self.home_x), float(self.home_y), float(self.current_z)]
             msg.yaw = float("nan")
             msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.trajectory_setpoint_publisher_.publish(msg)
 
             self.counter += 1
-            if self.counter == 20: # Tras 1 segundo de mandar el punto de apoyo...
+            if self.counter == 20: 
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
                 self.get_logger().info('¡Armando motores y subiendo a 1.5m!')
@@ -141,27 +139,27 @@ class OchoHibrido(Node):
                 self.counter = 0
 
         elif self.fase_vuelo == 2:
-            # Le mandamos subir recto hasta la altura objetivo y esperamos
+            # Subir a la altura objetivo
             msg = TrajectorySetpoint()
-            msg.position = [self.home_x, self.home_y, self.target_altitude]
+            msg.position = [float(self.home_x), float(self.home_y), float(self.target_altitude)]
             msg.yaw = float("nan")
             msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.trajectory_setpoint_publisher_.publish(msg)
 
             self.counter += 1
-            if self.counter >= 80: # 4 segundos esperando a que llegue arriba
+            if self.counter >= 80: 
                 self.get_logger().info('¡Iniciando el Ocho Matemático Oficial!')
                 self.fase_vuelo = 3
 
         elif self.fase_vuelo == 3:
-            # Empezamos a inyectar la lista de puntos a 20Hz
+            # Bucle del infinito
             if self.path_index < len(self.path):
                 msg = self.path[self.path_index]
                 msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
                 self.trajectory_setpoint_publisher_.publish(msg)
                 self.path_index += 1
             else:
-                self.path_index = 0 # Bucle infinito
+                self.path_index = 0
 
 def main(args=None):
     rclpy.init(args=args)
