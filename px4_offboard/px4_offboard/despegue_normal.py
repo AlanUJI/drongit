@@ -6,9 +6,8 @@ from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 
 class DespegueYMantener(Node):
     def __init__(self):
-        super().__init__('despegue_50cm')
+        super().__init__('despegue_50cm_suave')
 
-        # Configuración de Calidad de Servicio (QoS)
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -16,37 +15,31 @@ class DespegueYMantener(Node):
             depth=1
         )
 
-        # Publicadores
         self.offboard_control_mode_publisher_ = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
         self.trajectory_setpoint_publisher_ = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
         self.vehicle_command_publisher_ = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
-        # Suscriptores
         self.status_sub = self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
         self.odom_sub = self.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.odom_callback, qos_profile)
 
-        # Variables de estado interno
-        self.nav_state = 0
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = 0.0
-        
-        # Referencias espaciales fijas (Home)
         self.home_x = 0.0
         self.home_y = 0.0
         self.home_z = 0.0
         
-        # Lógica de la máquina de estados
         self.odom_received = False
         self.fase_vuelo = 0
         self.counter = 0
         
-        # Parámetros de la misión
-        self.target_altitude = -0.50  # 50 cm de altura
-        self.dt = 0.1                 # Frecuencia a 10 Hz
+        # Parámetros ajustados
+        self.target_altitude = -0.50  # 50 cm
+        self.dt = 0.1                 # 10 Hz
+        self.altitude_step = 0.01     # Incremento por cada ciclo (10 cm por segundo)
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
-        self.get_logger().info('Nodo de despegue estático iniciado. Esperando odometría VIO...')
+        self.get_logger().info('Nodo iniciado: Despegue con estabilización previa en suelo.')
 
     def vehicle_status_callback(self, msg):
         self.nav_state = msg.nav_state
@@ -87,37 +80,56 @@ class DespegueYMantener(Node):
         if not self.odom_received:
             return
 
-        # Señal de vida Offboard a >2Hz
         self.publish_offboard_control_mode()
 
-        # FASE 0: Anclaje de odometría inicial
+        # FASE 0: Referenciar Home
         if self.fase_vuelo == 0:
-            self.home_x = self.current_x
-            self.home_y = self.current_y
-            self.home_z = self.current_z
-            self.get_logger().info('Origen VIO referenciado. Solicitando armado en 1 segundo...')
+            self.home_x, self.home_y, self.home_z = self.current_x, self.current_y, self.current_z
+            self.setpoint_z = self.home_z
             self.fase_vuelo = 1
+            self.counter = 0
 
-        # FASE 1: Estabilización previa al armado
+        # FASE 1: Armado y cambio de modo
         elif self.fase_vuelo == 1:
-            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.current_z)
+            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             self.counter += 1
-            if self.counter >= int(1.0 / self.dt):
+            if self.counter == 10: # Esperar 1s enviando setpoints al suelo
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
-                self.get_logger().info('Motores armados. Ascendiendo a 50 cm y manteniendo posición indefinidamente.')
+                self.get_logger().info('Motores armados en ralentí.')
                 self.fase_vuelo = 2
+                self.counter = 0
 
-        # FASE 2: Ascenso y mantenimiento (Hovering continuo)
+        # FASE 2: Estabilización en suelo (5 segundos girando sin despegar)
         elif self.fase_vuelo == 2:
-            altitud_deseada = self.home_z + self.target_altitude
-            self.publish_trajectory_setpoint(self.home_x, self.home_y, altitud_deseada)
-            # Al no haber transición a una Fase 3, el dron se quedará aquí hasta que cortes el programa.
+            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
+            self.counter += 1
+            if self.counter >= 50: # 5 segundos (50 * 0.1s)
+                self.get_logger().info('Estabilización completada. Iniciando ascenso progresivo...')
+                self.fase_vuelo = 3
+
+        # FASE 3: Ascenso lento y mantenimiento
+        elif self.fase_vuelo == 3:
+            target_z = self.home_z + self.target_altitude
+            
+            # Si aún no hemos llegado a la altura deseada, subimos poco a poco
+            if self.setpoint_z > target_z:
+                self.setpoint_z -= self.altitude_step
+            else:
+                self.setpoint_z = target_z
+            
+            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.setpoint_z)
 
 def main(args=None):
     rclpy.init(args=args)
-    rclpy.spin(DespegueYMantener())
-    rclpy.shutdown()
+    node = DespegueYMantener()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
