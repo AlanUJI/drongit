@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import rclpy
+import math  # <--- IMPORTANTE: Necesitamos math para el seno y coseno
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
@@ -30,9 +31,12 @@ class DespegueAvanceAterrizaje(Node):
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_z = 0.0
+        self.current_yaw = 0.0 # <--- NUEVA VARIABLE: Orientación actual
+        
         self.home_x = 0.0
         self.home_y = 0.0
         self.home_z = 0.0
+        self.home_yaw = 0.0    # <--- NUEVA VARIABLE: Hacia dónde miramos al arrancar
         
         # Puntos de consigna iterativos
         self.sp_x = 0.0
@@ -49,7 +53,7 @@ class DespegueAvanceAterrizaje(Node):
         self.dt = 0.1                 
         self.target_altitude = -0.50  
         self.altitude_step = 0.01     
-        self.velocidad_horizontal = 0.20 # <--- NUEVO: 20 cm/s para avance suave
+        self.velocidad_horizontal = 0.20 
         self.velocidad_descenso = 0.2   
 
         # Hilo espía de calidad VIO
@@ -57,7 +61,7 @@ class DespegueAvanceAterrizaje(Node):
         self.qvio_thread.start()
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
-        self.get_logger().info('Nodo de Despegue, Avance (0.5m) y Aterrizaje iniciado. Esperando OK de VIO...')
+        self.get_logger().info('Nodo de Avance Inteligente iniciado. Esperando OK de VIO...')
 
     def qvio_monitor_worker(self):
         try:
@@ -82,6 +86,13 @@ class DespegueAvanceAterrizaje(Node):
         self.current_x = float(msg.position[0])
         self.current_y = float(msg.position[1])
         self.current_z = float(msg.position[2])
+        
+        # Extraemos el Yaw (orientación) a partir de los Quaterniones de PX4
+        q = msg.q
+        if not math.isnan(q[0]):
+            w, x, y, z = q[0], q[1], q[2], q[3]
+            self.current_yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+            
         self.odom_received = True
 
     def publish_offboard_control_mode(self):
@@ -93,7 +104,7 @@ class DespegueAvanceAterrizaje(Node):
     def publish_trajectory_setpoint(self):
         msg = TrajectorySetpoint()
         msg.position = [float(self.sp_x), float(self.sp_y), float(self.sp_z)]
-        msg.yaw = float("nan") # Sin giros sobre su eje
+        msg.yaw = float("nan") # Sin giros, manteniendo el rumbo fijo
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
 
@@ -112,33 +123,33 @@ class DespegueAvanceAterrizaje(Node):
 
     def trigger_auto_land(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-        self.get_logger().info('¡Colchón de aire (10cm) alcanzado! Modo NAV_LAND activado. PX4 asume el toque final.')
+        self.get_logger().info('¡Modo NAV_LAND activado! Aterrizando...')
 
     def timer_callback(self):
         if not self.odom_received:
             return
 
         self.print_counter += 1
-        # Actualizado a < 8 porque hemos añadido una fase
         if self.print_counter >= 10 and self.fase_vuelo < 8:
             self.get_logger().info(f'[MONITOR VIO] Calidad REAL: {self.real_qvio_quality}%')
             self.print_counter = 0
 
         self.publish_offboard_control_mode()
 
-        # FASE 0: Captura de Home
+        # FASE 0: Captura de Home y Orientación
         if self.fase_vuelo == 0:
             self.home_x, self.home_y, self.home_z = self.current_x, self.current_y, self.current_z
+            self.home_yaw = self.current_yaw # <--- GUARDAMOS LA ORIENTACIÓN FÍSICA
+            
             self.sp_x, self.sp_y, self.sp_z = self.home_x, self.home_y, self.home_z
             self.fase_vuelo = 1
-            self.get_logger().info(f'Home fijado en Z: {self.home_z:.2f}. Solicitando Offboard...')
+            self.get_logger().info('Home fijado. Solicitando Offboard...')
 
         # FASE 1: Asegurar Modo Offboard
         elif self.fase_vuelo == 1:
             if self.nav_state != 14:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
             else:
-                self.get_logger().info('Confirmado: Modo Offboard activo. Solicitando Armado...')
                 self.fase_vuelo = 2
 
         # FASE 2: Asegurar Armado
@@ -146,19 +157,16 @@ class DespegueAvanceAterrizaje(Node):
             if self.arming_state != 2:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
             else:
-                self.get_logger().info('Confirmado: Motores armados. Iniciando validación VIO en suelo...')
                 self.fase_vuelo = 3
                 self.counter = 0
 
-        # FASE 3: Estabilización VIO de 3 segundos pegado al suelo
+        # FASE 3: Estabilización VIO
         elif self.fase_vuelo == 3:
             self.sp_z = self.home_z + 0.15 
             if self.real_qvio_quality >= 50:
                 self.counter += 1
-                if self.counter % 10 == 0:
-                    self.get_logger().info(f'----> Acumulando progreso VIO: ({self.counter/10:.0f}/3 seg superados)')
             if self.counter >= 30: 
-                self.get_logger().info('¡Validación VIO exitosa! Iniciando ascenso progresivo a 50cm...')
+                self.get_logger().info('¡Ascenso a 50cm!')
                 self.sp_z = self.home_z
                 self.fase_vuelo = 4
 
@@ -169,40 +177,44 @@ class DespegueAvanceAterrizaje(Node):
                 self.sp_z -= self.altitude_step 
             else:
                 self.sp_z = target_z
-                self.get_logger().info('¡Altitud de 50cm alcanzada! Iniciando vuelo estacionario (5 segundos)...')
                 self.fase_vuelo = 5
                 self.counter = 0
 
-        # FASE 5: Vuelo estacionario (Hover de 5 segundos)
+        # FASE 5: Vuelo estacionario (Hover)
         elif self.fase_vuelo == 5:
             self.counter += 1
-            if self.counter >= 50: # 50 ciclos = 5 segundos
-                self.get_logger().info('Hover finalizado. Iniciando avance horizontal de 0.5 metros...')
+            if self.counter >= 50: 
+                self.get_logger().info('¡Iniciando avance inteligente (0.5m hacia delante)!')
                 self.fase_vuelo = 6
 
-        # FASE 6: AVANCE HORIZONTAL (0.5 metros en el eje X)
+        # FASE 6: AVANCE INTELIGENTE (Calculado con Trigonometría)
         elif self.fase_vuelo == 6:
-            target_x = self.home_x + 0.50 # Medio metro hacia adelante
+            distancia_total = 0.50
             
-            # Incrementamos progresivamente la X
-            if self.sp_x < target_x:
-                self.sp_x += (self.velocidad_horizontal * self.dt)
+            # Calculamos las coordenadas exactas a las que queremos ir (Relativo al morro del dron)
+            target_x = self.home_x + (distancia_total * math.cos(self.home_yaw))
+            target_y = self.home_y + (distancia_total * math.sin(self.home_yaw))
+            
+            # Usamos lógica vectorial para movernos hacia ese punto suavemente
+            dist_x = target_x - self.sp_x
+            dist_y = target_y - self.sp_y
+            distancia_restante = math.hypot(dist_x, dist_y)
+            paso = self.velocidad_horizontal * self.dt
+
+            if distancia_restante > 0.05: # Margen de 5 cm
+                self.sp_x += (dist_x / distancia_restante) * paso
+                self.sp_y += (dist_y / distancia_restante) * paso
             else:
-                self.sp_x = target_x # Aseguramos el valor exacto
-                self.get_logger().info('¡Objetivo alcanzado! Iniciando descenso vertical en el sitio exacto...')
-                # CONGELAMOS LA Y ACTUAL PARA NO DESVIARNOS AL BAJAR
-                self.sp_y = self.current_y
+                self.sp_x = target_x 
+                self.sp_y = target_y
+                self.get_logger().info('¡Objetivo alcanzado! Iniciando descenso...')
                 self.fase_vuelo = 7
 
-        # FASE 7: Descenso Vertical en el sitio
+        # FASE 7: Descenso Vertical
         elif self.fase_vuelo == 7:
-            target_z_descenso = self.home_z - 0.10 # Límite de 10 cm del suelo real
-            
-            # Bajamos el punto imaginario progresivamente
+            target_z_descenso = self.home_z - 0.10 
             if self.sp_z < target_z_descenso: 
                 self.sp_z += (self.velocidad_descenso * self.dt)
-            
-            # Comprobamos si el dron FÍSICO ha cruzado la capa de los 10cm
             if self.current_z >= target_z_descenso:
                 self.sp_z = target_z_descenso
                 self.trigger_auto_land()
@@ -211,13 +223,9 @@ class DespegueAvanceAterrizaje(Node):
         # FASE 8: Esperar desarmado final
         elif self.fase_vuelo == 8:
             if self.arming_state != 2:
-                self.get_logger().info('¡Motores desarmados! Aterrizaje completado con éxito.')
-                self.fase_vuelo = 9 # Fin del ciclo
-            
-            # Interrumpimos la publicación de Trayectorias para no pelear con NAV_LAND
+                self.fase_vuelo = 9 
             return 
 
-        # Siempre publicamos el setpoint al final del ciclo
         if self.fase_vuelo < 9:
             self.publish_trajectory_setpoint()
 
