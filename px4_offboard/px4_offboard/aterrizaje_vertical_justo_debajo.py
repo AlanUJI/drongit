@@ -89,12 +89,12 @@ class AterrizajePerfecto(Node):
 
         # --- LÓGICA DE DESCENSO ---
         
-        # Descenso Offboard suave hasta estar a 30 centímetros del suelo
-        if self.current_z < -0.30:
+        # Descenso Offboard suave hasta estar a 10 centímetros del suelo
+        if self.current_z < -0.10:
             self.target_z += 0.02  # Baja 20cm por segundo
             self.publish_trajectory_setpoint()
             
-        # Cuando llegamos a la capa crítica (menos de 30 cm)
+        # Cuando llegamos a la capa crítica (menos de 10 cm)
         else:
             self.trigger_auto_land()
             self.landed_confirmed = True

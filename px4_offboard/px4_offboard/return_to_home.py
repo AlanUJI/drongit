@@ -100,14 +100,14 @@ class ReturnToHomeYaterrizaje(Node):
                 self.sp_x += (dist_x / distancia_total) * paso
                 self.sp_y += (dist_y / distancia_total) * paso
             else:
-                self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical...')
+                self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical a 10 cm...')
                 self.sp_x = 0.0
                 self.sp_y = 0.0
                 self.fase_rth = 2
 
         # FASE 2: Descenso vertical en el origen
         elif self.fase_rth == 2:
-            if self.current_z < -0.30: # Recordamos que Z es negativo hacia arriba
+            if self.current_z < -0.10: # Recordamos que Z es negativo hacia arriba
                 self.sp_z += (self.velocidad_descenso * self.dt)
             else:
                 self.trigger_auto_land()

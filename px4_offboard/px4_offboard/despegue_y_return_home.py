@@ -194,14 +194,14 @@ class DespegueYReturnHome(Node):
                 self.sp_x += (dist_x / distancia_total) * paso
                 self.sp_y += (dist_y / distancia_total) * paso
             else:
-                self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical a 30cm...')
+                self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical a 10cm...')
                 self.sp_x = self.home_x
                 self.sp_y = self.home_y
                 self.fase_vuelo = 7
 
         # FASE 7: Descenso Vertical
         elif self.fase_vuelo == 7:
-            target_z_descenso = self.home_z - 0.30
+            target_z_descenso = self.home_z - 0.10
             
             # Bajamos el punto imaginario progresivamente
             if self.sp_z < target_z_descenso: 
