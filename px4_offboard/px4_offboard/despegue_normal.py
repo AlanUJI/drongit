@@ -31,6 +31,7 @@ class DespegueYMantener(Node):
         self.home_z = 0.0
         
         self.odom_received = False
+        self.odom_quality = 0  # <--- NUEVA VARIABLE PARA LA CALIDAD
         self.fase_vuelo = 0
         self.counter = 0
         
@@ -51,6 +52,14 @@ class DespegueYMantener(Node):
         self.current_x = float(msg.position[0])
         self.current_y = float(msg.position[1])
         self.current_z = float(msg.position[2])
+        
+        # Extraemos la calidad de VIO (0 a 100)
+        # Usamos try/except por si la versión de px4_msgs no lo incluye, evitar que crashee
+        try:
+            self.odom_quality = msg.quality
+        except AttributeError:
+            self.odom_quality = 100 
+
         self.odom_received = True
 
     def publish_offboard_control_mode(self):
@@ -83,7 +92,6 @@ class DespegueYMantener(Node):
         if not self.odom_received:
             return
 
-        # Siempre enviar modo de control offboard (>2Hz necesario)
         self.publish_offboard_control_mode()
 
         # FASE 0: Captura de Home
@@ -93,7 +101,7 @@ class DespegueYMantener(Node):
             self.fase_vuelo = 1
             self.get_logger().info(f'Home fijado en Z: {self.home_z:.2f}. Solicitando Offboard...')
 
-        # FASE 1: Asegurar Modo Offboard (Insistir hasta que nav_state == 14)
+        # FASE 1: Asegurar Modo Offboard
         elif self.fase_vuelo == 1:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             if self.nav_state != 14:
@@ -102,29 +110,42 @@ class DespegueYMantener(Node):
                 self.get_logger().info('Confirmado: Modo Offboard activo. Solicitando Armado...')
                 self.fase_vuelo = 2
 
-        # FASE 2: Asegurar Armado (Insistir hasta que arming_state == 2)
+        # FASE 2: Asegurar Armado
         elif self.fase_vuelo == 2:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             if self.arming_state != 2:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
             else:
-                self.get_logger().info('Confirmado: Motores armados. Estabilizando 5s en suelo...')
+                self.get_logger().info('Confirmado: Motores armados. Iniciando validación de VIO en suelo...')
                 self.fase_vuelo = 3
                 self.counter = 0
 
-        # FASE 3: Estabilización en suelo (Giro de hélices sin despegar)
+        # FASE 3: Estabilización INTELIGENTE en suelo
         elif self.fase_vuelo == 3:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
-            self.counter += 1
-            if self.counter >= 50: # 5 segundos
-                self.get_logger().info('Iniciando ascenso progresivo a 50cm...')
+            
+            # Condición de seguridad: VIO superior al 50%
+            if self.odom_quality >= 50:
+                self.counter += 1
+                # Imprimir mensaje cada 1 segundo (10 ciclos)
+                if self.counter % 10 == 0:
+                    self.get_logger().info(f'Estabilizando... Calidad VIO: {self.odom_quality}% ({self.counter/10:.0f}/5 seg)')
+            else:
+                # Si la calidad cae, advertimos y REINICIAMOS el contador
+                if self.counter > 0:
+                    self.get_logger().warn(f'¡Caída VIO detectada! Calidad: {self.odom_quality}%. Reiniciando estabilización.')
+                self.counter = 0 
+
+            # Si logramos 5 segundos CONTINUOS de buena calidad
+            if self.counter >= 50: 
+                self.get_logger().info('¡Validación VIO exitosa! Iniciando ascenso a 50cm...')
                 self.fase_vuelo = 4
 
         # FASE 4: Ascenso suave y mantenimiento
         elif self.fase_vuelo == 4:
             target_z = self.home_z + self.target_altitude
             if self.setpoint_z > target_z:
-                self.setpoint_z -= self.altitude_step # NED: restar es subir
+                self.setpoint_z -= self.altitude_step 
             else:
                 self.setpoint_z = target_z
             
