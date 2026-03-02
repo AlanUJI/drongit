@@ -53,7 +53,6 @@ class DespegueYMantener(Node):
         Lee las líneas de texto en tiempo real y extrae el porcentaje.
         """
         try:
-            # <--- CORRECCIÓN DE PYTHON 3.6 APLICADA AQUÍ --->
             process = subprocess.Popen(['voxl-inspect-qvio'], stdout=subprocess.PIPE, universal_newlines=True)
             for line in iter(process.stdout.readline, ''):
                 if '|' in line and '%' in line:
@@ -133,23 +132,26 @@ class DespegueYMantener(Node):
             if self.arming_state != 2:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
             else:
-                self.get_logger().info('Confirmado: Motores armados. Iniciando validación de VIO...')
+                self.get_logger().info('Confirmado: Motores armados. Iniciando validación de VIO (Ralentí en suelo)...')
                 self.fase_vuelo = 3
                 self.counter = 0
 
+        # FASE 3: Estabilización ACUMULATIVA pegado al suelo
         elif self.fase_vuelo == 3:
-            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
+            # ENGAÑO: Le pedimos ir 15 cm hacia abajo para forzar los motores a quedarse en el mínimo absoluto
+            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z + 0.15)
             
             if self.real_qvio_quality >= 50:
                 self.counter += 1
                 if self.counter % 10 == 0:
-                    self.get_logger().info(f'----> Acumulando progreso: ({self.counter/10:.0f}/5 seg superados)')
-            else:
-                if self.counter % 10 == 0:
-                    self.get_logger().info('----> Pausa en acumulación. Esperando que VIO mejore...')
-
-            if self.counter >= 50: 
+                    # Cambiado de 5 a 3 segundos en el mensaje
+                    self.get_logger().info(f'----> Acumulando progreso VIO: ({self.counter/10:.0f}/3 seg superados)')
+            
+            # Cambiado de 50 a 30 (3 segundos) para ganarle la carrera al Land Detector de PX4
+            if self.counter >= 30: 
                 self.get_logger().info('¡Validación VIO exitosa! Iniciando ascenso a 50cm...')
+                # ¡MUY IMPORTANTE! Reseteamos el setpoint al nivel real del suelo antes de empezar a subir
+                self.setpoint_z = self.home_z
                 self.fase_vuelo = 4
 
         elif self.fase_vuelo == 4:
