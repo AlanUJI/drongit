@@ -4,6 +4,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
 
+import subprocess   # <--- LÍNEA AÑADIDA: Para ejecutar comandos de Linux
+import threading    # <--- LÍNEA AÑADIDA: Para crear el hilo en segundo plano
+
 class DespegueYMantener(Node):
     def __init__(self):
         super().__init__('despegue_50cm_persistente')
@@ -28,19 +31,46 @@ class DespegueYMantener(Node):
         self.home_z = 0.0
         
         self.odom_received = False
-        self.odom_quality = 0 
+        self.real_qvio_quality = 0   # <--- LÍNEA AÑADIDA: Variable para la calidad REAL hackeada
         self.fase_vuelo = 0
         self.counter = 0
-        
-        self.print_counter = 0  # <--- LÍNEA AÑADIDA: Inicializamos el contador para el mensaje de terminal
+        self.print_counter = 0
         
         self.target_altitude = -0.50  
         self.dt = 0.1                 
         self.altitude_step = 0.01     
         self.setpoint_z = 0.0
 
+        # <--- LÍNEAS AÑADIDAS: Iniciamos el espía en segundo plano --->
+        self.qvio_thread = threading.Thread(target=self.qvio_monitor_worker, daemon=True)
+        self.qvio_thread.start()
+        # <------------------------------------------------------------>
+
         self.timer = self.create_timer(self.dt, self.timer_callback)
-        self.get_logger().info('Nodo Persistente iniciado. Esperando OK de QVIO...')
+        self.get_logger().info('Nodo Persistente iniciado. Esperando OK de VIO...')
+
+    # <--- NUEVA FUNCIÓN AÑADIDA: EL ESPÍA DE TERMINAL --->
+    def qvio_monitor_worker(self):
+        """
+        Hack de ingeniería: Abre voxl-inspect-qvio por debajo, 
+        lee las líneas de texto en tiempo real y extrae el porcentaje.
+        """
+        try:
+            process = subprocess.Popen(['voxl-inspect-qvio'], stdout=subprocess.PIPE, text=True)
+            for line in iter(process.stdout.readline, ''):
+                # Buscamos la línea que tiene los datos (contiene % y |)
+                if '|' in line and '%' in line:
+                    try:
+                        parts = line.split('|')
+                        if len(parts) >= 6:
+                            # La calidad está en la columna 5. Extraemos "  98% " -> "98"
+                            qual_str = parts[4].replace('%', '').strip()
+                            self.real_qvio_quality = int(qual_str)
+                    except ValueError:
+                        pass
+        except Exception as e:
+            self.get_logger().error(f"Error en espía QVIO: {e}")
+    # <--------------------------------------------------->
 
     def vehicle_status_callback(self, msg):
         self.nav_state = msg.nav_state
@@ -50,12 +80,6 @@ class DespegueYMantener(Node):
         self.current_x = float(msg.position[0])
         self.current_y = float(msg.position[1])
         self.current_z = float(msg.position[2])
-        
-        try:
-            self.odom_quality = msg.quality
-        except AttributeError:
-            self.odom_quality = 100 
-
         self.odom_received = True
 
     def publish_offboard_control_mode(self):
@@ -88,12 +112,12 @@ class DespegueYMantener(Node):
         if not self.odom_received:
             return
 
-        # <--- LÍNEAS AÑADIDAS: PUBLICAR CALIDAD VIO CADA 1 SEGUNDO INDEPENDIENTEMENTE DE LA FASE --->
+        # <--- LÍNEAS AÑADIDAS: PUBLICAR CALIDAD REAL CADA 1 SEGUNDO --->
         self.print_counter += 1
-        if self.print_counter >= 10:  # 10 ciclos a 10Hz = 1 segundo
-            self.get_logger().info(f'[MONITOR VIO] Calidad recibida en tiempo real: {self.odom_quality}%')
+        if self.print_counter >= 10:
+            self.get_logger().info(f'[MONITOR VIO] Calidad REAL extraída del sistema: {self.real_qvio_quality}%')
             self.print_counter = 0
-        # <------------------------------------------------------------------------------------------>
+        # <------------------------------------------------------------>
 
         self.publish_offboard_control_mode()
 
@@ -124,7 +148,8 @@ class DespegueYMantener(Node):
         elif self.fase_vuelo == 3:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             
-            if self.odom_quality >= 50:
+            # <--- LÍNEA MODIFICADA: Ahora usamos self.real_qvio_quality en lugar de msg.quality --->
+            if self.real_qvio_quality >= 50:
                 self.counter += 1
                 if self.counter % 10 == 0:
                     self.get_logger().info(f'----> Acumulando progreso: ({self.counter/10:.0f}/5 seg superados)')
