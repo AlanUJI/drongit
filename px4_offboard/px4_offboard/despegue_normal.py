@@ -4,8 +4,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
 
-import subprocess   # <--- LÍNEA AÑADIDA: Para ejecutar comandos de Linux
-import threading    # <--- LÍNEA AÑADIDA: Para crear el hilo en segundo plano
+import subprocess
+import threading
 
 class DespegueYMantener(Node):
     def __init__(self):
@@ -31,7 +31,7 @@ class DespegueYMantener(Node):
         self.home_z = 0.0
         
         self.odom_received = False
-        self.real_qvio_quality = 0   # <--- LÍNEA AÑADIDA: Variable para la calidad REAL hackeada
+        self.real_qvio_quality = 0   
         self.fase_vuelo = 0
         self.counter = 0
         self.print_counter = 0
@@ -41,36 +41,31 @@ class DespegueYMantener(Node):
         self.altitude_step = 0.01     
         self.setpoint_z = 0.0
 
-        # <--- LÍNEAS AÑADIDAS: Iniciamos el espía en segundo plano --->
+        # Iniciamos el espía en segundo plano
         self.qvio_thread = threading.Thread(target=self.qvio_monitor_worker, daemon=True)
         self.qvio_thread.start()
-        # <------------------------------------------------------------>
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
         self.get_logger().info('Nodo Persistente iniciado. Esperando OK de VIO...')
 
-    # <--- NUEVA FUNCIÓN AÑADIDA: EL ESPÍA DE TERMINAL --->
     def qvio_monitor_worker(self):
         """
-        Hack de ingeniería: Abre voxl-inspect-qvio por debajo, 
-        lee las líneas de texto en tiempo real y extrae el porcentaje.
+        Lee las líneas de texto en tiempo real y extrae el porcentaje.
         """
         try:
-            process = subprocess.Popen(['voxl-inspect-qvio'], stdout=subprocess.PIPE, text=True)
+            # <--- CORRECCIÓN DE PYTHON 3.6 APLICADA AQUÍ --->
+            process = subprocess.Popen(['voxl-inspect-qvio'], stdout=subprocess.PIPE, universal_newlines=True)
             for line in iter(process.stdout.readline, ''):
-                # Buscamos la línea que tiene los datos (contiene % y |)
                 if '|' in line and '%' in line:
                     try:
                         parts = line.split('|')
                         if len(parts) >= 6:
-                            # La calidad está en la columna 5. Extraemos "  98% " -> "98"
                             qual_str = parts[4].replace('%', '').strip()
                             self.real_qvio_quality = int(qual_str)
                     except ValueError:
                         pass
         except Exception as e:
             self.get_logger().error(f"Error en espía QVIO: {e}")
-    # <--------------------------------------------------->
 
     def vehicle_status_callback(self, msg):
         self.nav_state = msg.nav_state
@@ -112,12 +107,10 @@ class DespegueYMantener(Node):
         if not self.odom_received:
             return
 
-        # <--- LÍNEAS AÑADIDAS: PUBLICAR CALIDAD REAL CADA 1 SEGUNDO --->
         self.print_counter += 1
         if self.print_counter >= 10:
             self.get_logger().info(f'[MONITOR VIO] Calidad REAL extraída del sistema: {self.real_qvio_quality}%')
             self.print_counter = 0
-        # <------------------------------------------------------------>
 
         self.publish_offboard_control_mode()
 
@@ -144,11 +137,9 @@ class DespegueYMantener(Node):
                 self.fase_vuelo = 3
                 self.counter = 0
 
-        # FASE 3: Estabilización ACUMULATIVA sin auto-desarmado
         elif self.fase_vuelo == 3:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             
-            # <--- LÍNEA MODIFICADA: Ahora usamos self.real_qvio_quality en lugar de msg.quality --->
             if self.real_qvio_quality >= 50:
                 self.counter += 1
                 if self.counter % 10 == 0:
