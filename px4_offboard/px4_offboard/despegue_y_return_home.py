@@ -202,9 +202,13 @@ class DespegueYReturnHome(Node):
         # FASE 7: Descenso Vertical
         elif self.fase_vuelo == 7:
             target_z_descenso = self.home_z - 0.30
-            if self.sp_z < target_z_descenso: # Bajando: El valor de Z se vuelve más positivo (menos negativo)
+            
+            # Bajamos el punto imaginario progresivamente
+            if self.sp_z < target_z_descenso: 
                 self.sp_z += (self.velocidad_descenso * self.dt)
-            else:
+            
+            # <--- CORRECCIÓN 1: Comprobamos si el dron FÍSICO ha cruzado los 30cm --->
+            if self.current_z >= target_z_descenso:
                 self.sp_z = target_z_descenso
                 self.trigger_auto_land()
                 self.fase_vuelo = 8
@@ -214,8 +218,11 @@ class DespegueYReturnHome(Node):
             if self.arming_state != 2:
                 self.get_logger().info('¡Motores desarmados! Misión completada con éxito.')
                 self.fase_vuelo = 9 # Fin del ciclo
+            
+            # <--- CORRECCIÓN 2: Interrumpimos la publicación de Trayectorias para no pelear con NAV_LAND --->
+            return 
 
-        # Siempre publicamos el setpoint al final del ciclo (Excepto si ya aterrizó)
+        # Siempre publicamos el setpoint al final del ciclo (Excepto si ya aterrizó o está en NAV_LAND)
         if self.fase_vuelo < 9:
             self.publish_trajectory_setpoint()
 
