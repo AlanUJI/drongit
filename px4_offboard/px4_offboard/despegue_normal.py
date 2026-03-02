@@ -15,30 +15,28 @@ class DespegueYMantener(Node):
             depth=1
         )
 
-        # Publicadores
         self.offboard_control_mode_publisher_ = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
         self.trajectory_setpoint_publisher_ = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
         self.vehicle_command_publisher_ = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
-        # Suscriptores
         self.status_sub = self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
         self.odom_sub = self.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.odom_callback, qos_profile)
 
-        # Estados de telemetría
         self.nav_state = 0
         self.arming_state = 0
         self.current_z = 0.0
         self.home_z = 0.0
         
         self.odom_received = False
-        self.odom_quality = 0
+        self.odom_quality = 0 
         self.fase_vuelo = 0
         self.counter = 0
         
-        # Parámetros de misión
-        self.target_altitude = -0.50  # 50 cm arriba (NED)
-        self.dt = 0.1                 # 10 Hz
-        self.altitude_step = 0.01     # Subida de 10 cm/s
+        self.print_counter = 0  # <--- LÍNEA AÑADIDA: Inicializamos el contador para el mensaje de terminal
+        
+        self.target_altitude = -0.50  
+        self.dt = 0.1                 
+        self.altitude_step = 0.01     
         self.setpoint_z = 0.0
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
@@ -69,7 +67,6 @@ class DespegueYMantener(Node):
     def publish_trajectory_setpoint(self, x, y, z):
         msg = TrajectorySetpoint()
         msg.position = [float(x), float(y), float(z)]
-        # Evitar que el dron gire sobre sí mismo
         msg.yaw = float("nan") 
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
@@ -91,16 +88,21 @@ class DespegueYMantener(Node):
         if not self.odom_received:
             return
 
+        # <--- LÍNEAS AÑADIDAS: PUBLICAR CALIDAD VIO CADA 1 SEGUNDO INDEPENDIENTEMENTE DE LA FASE --->
+        self.print_counter += 1
+        if self.print_counter >= 10:  # 10 ciclos a 10Hz = 1 segundo
+            self.get_logger().info(f'[MONITOR VIO] Calidad recibida en tiempo real: {self.odom_quality}%')
+            self.print_counter = 0
+        # <------------------------------------------------------------------------------------------>
+
         self.publish_offboard_control_mode()
 
-        # FASE 0: Captura de Home
         if self.fase_vuelo == 0:
             self.home_x, self.home_y, self.home_z = self.current_x, self.current_y, self.current_z
             self.setpoint_z = self.home_z
             self.fase_vuelo = 1
             self.get_logger().info(f'Home fijado en Z: {self.home_z:.2f}. Solicitando Offboard...')
 
-        # FASE 1: Asegurar Modo Offboard
         elif self.fase_vuelo == 1:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             if self.nav_state != 14:
@@ -109,37 +111,31 @@ class DespegueYMantener(Node):
                 self.get_logger().info('Confirmado: Modo Offboard activo. Solicitando Armado...')
                 self.fase_vuelo = 2
 
-        # FASE 2: Asegurar Armado
         elif self.fase_vuelo == 2:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             if self.arming_state != 2:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
             else:
-                self.get_logger().info('Confirmado: Motores armados. Iniciando validación acumulativa de VIO...')
+                self.get_logger().info('Confirmado: Motores armados. Iniciando validación de VIO...')
                 self.fase_vuelo = 3
                 self.counter = 0
 
-        # FASE 3: Estabilización ACUMULATIVA en suelo (Empujando hacia abajo)
+        # FASE 3: Estabilización ACUMULATIVA sin auto-desarmado
         elif self.fase_vuelo == 3:
-            # ENGAÑO: Le decimos que vaya 20 cm bajo el suelo para forzar el ralentí sin elevarse
-            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z + 0.20)
+            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             
-            # Solo sumamos si es bueno, NO reiniciamos si es malo.
             if self.odom_quality >= 50:
                 self.counter += 1
                 if self.counter % 10 == 0:
-                    self.get_logger().info(f'Acumulando... Calidad VIO: {self.odom_quality}% ({self.counter/10:.0f}/5 seg)')
+                    self.get_logger().info(f'----> Acumulando progreso: ({self.counter/10:.0f}/5 seg superados)')
             else:
-                self.get_logger().debug(f'Pausa en VIO ({self.odom_quality}%). Esperando mejora...')
+                if self.counter % 10 == 0:
+                    self.get_logger().info('----> Pausa en acumulación. Esperando que VIO mejore...')
 
-            # Despegamos cuando hayamos sumado 50 ciclos (5 segundos) en total
             if self.counter >= 50: 
                 self.get_logger().info('¡Validación VIO exitosa! Iniciando ascenso a 50cm...')
-                # Resetear el setpoint_z al nivel del suelo real antes de subir
-                self.setpoint_z = self.home_z 
                 self.fase_vuelo = 4
 
-        # FASE 4: Ascenso suave y mantenimiento
         elif self.fase_vuelo == 4:
             target_z = self.home_z + self.target_altitude
             if self.setpoint_z > target_z:
