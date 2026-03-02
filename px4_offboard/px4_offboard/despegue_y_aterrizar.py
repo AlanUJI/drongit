@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import rclpy
-import math
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
@@ -8,9 +7,9 @@ from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 import subprocess
 import threading
 
-class DespegueYReturnHome(Node):
+class DespegueYAterrizajeVertical(Node):
     def __init__(self):
-        super().__init__('despegue_y_return_home')
+        super().__init__('despegue_y_aterrizaje_vertical')
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -19,16 +18,13 @@ class DespegueYReturnHome(Node):
             depth=1
         )
 
-        # Publicadores
         self.offboard_control_mode_publisher_ = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
         self.trajectory_setpoint_publisher_ = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
         self.vehicle_command_publisher_ = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
-        # Suscriptores
         self.status_sub = self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
         self.odom_sub = self.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.odom_callback, qos_profile)
 
-        # Variables de estado
         self.nav_state = 0
         self.arming_state = 0
         self.current_x = 0.0
@@ -53,7 +49,6 @@ class DespegueYReturnHome(Node):
         self.dt = 0.1                 
         self.target_altitude = -0.50  
         self.altitude_step = 0.01     
-        self.velocidad_horizontal = 0.5 
         self.velocidad_descenso = 0.2   
 
         # Hilo espía de calidad VIO
@@ -61,7 +56,7 @@ class DespegueYReturnHome(Node):
         self.qvio_thread.start()
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
-        self.get_logger().info('Nodo Misión Completa iniciado. Esperando OK de VIO...')
+        self.get_logger().info('Nodo de Despegue y Aterrizaje Vertical iniciado. Esperando OK de VIO...')
 
     def qvio_monitor_worker(self):
         try:
@@ -116,14 +111,14 @@ class DespegueYReturnHome(Node):
 
     def trigger_auto_land(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-        self.get_logger().info('¡Modo NAV_LAND activado! Aterrizando de forma segura...')
+        self.get_logger().info('¡Colchón de aire (10cm) alcanzado! Modo NAV_LAND activado. PX4 asume el toque final.')
 
     def timer_callback(self):
         if not self.odom_received:
             return
 
         self.print_counter += 1
-        if self.print_counter >= 10 and self.fase_vuelo < 8:
+        if self.print_counter >= 10 and self.fase_vuelo < 7:
             self.get_logger().info(f'[MONITOR VIO] Calidad REAL: {self.real_qvio_quality}%')
             self.print_counter = 0
 
@@ -180,55 +175,42 @@ class DespegueYReturnHome(Node):
         elif self.fase_vuelo == 5:
             self.counter += 1
             if self.counter >= 100: # 100 ciclos = 10 segundos
-                self.get_logger().info('Hover finalizado. Iniciando Return To Home (Volviendo al origen)...')
+                self.get_logger().info('Hover finalizado. Iniciando descenso vertical en el sitio exacto...')
+                # CONGELAR COORDENADAS X e Y ACTUALES PARA EL DESCENSO
+                self.sp_x = self.current_x
+                self.sp_y = self.current_y
                 self.fase_vuelo = 6
 
-        # FASE 6: Return To Home Horizontal
+        # FASE 6: Descenso Vertical en el sitio
         elif self.fase_vuelo == 6:
-            dist_x = self.home_x - self.sp_x
-            dist_y = self.home_y - self.sp_y
-            distancia_total = math.hypot(dist_x, dist_y)
-            paso = self.velocidad_horizontal * self.dt
-
-            if distancia_total > 0.1:
-                self.sp_x += (dist_x / distancia_total) * paso
-                self.sp_y += (dist_y / distancia_total) * paso
-            else:
-                self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical a 10cm...')
-                self.sp_x = self.home_x
-                self.sp_y = self.home_y
-                self.fase_vuelo = 7
-
-        # FASE 7: Descenso Vertical
-        elif self.fase_vuelo == 7:
-            target_z_descenso = self.home_z - 0.10
+            target_z_descenso = self.home_z - 0.10 # Límite de 10 cm del suelo real
             
             # Bajamos el punto imaginario progresivamente
             if self.sp_z < target_z_descenso: 
                 self.sp_z += (self.velocidad_descenso * self.dt)
             
-            # <--- CORRECCIÓN 1: Comprobamos si el dron FÍSICO ha cruzado los 10cm --->
+            # Comprobamos si el dron FÍSICO ha cruzado la capa de los 10cm
             if self.current_z >= target_z_descenso:
                 self.sp_z = target_z_descenso
                 self.trigger_auto_land()
-                self.fase_vuelo = 8
+                self.fase_vuelo = 7
 
-        # FASE 8: Esperar desarmado final
-        elif self.fase_vuelo == 8:
+        # FASE 7: Esperar desarmado final
+        elif self.fase_vuelo == 7:
             if self.arming_state != 2:
-                self.get_logger().info('¡Motores desarmados! Misión completada con éxito.')
-                self.fase_vuelo = 9 # Fin del ciclo
+                self.get_logger().info('¡Motores desarmados! Aterrizaje completado con éxito.')
+                self.fase_vuelo = 8 # Fin del ciclo
             
-            # <--- CORRECCIÓN 2: Interrumpimos la publicación de Trayectorias para no pelear con NAV_LAND --->
+            # Interrumpimos la publicación de Trayectorias para no pelear con NAV_LAND
             return 
 
         # Siempre publicamos el setpoint al final del ciclo (Excepto si ya aterrizó o está en NAV_LAND)
-        if self.fase_vuelo < 9:
+        if self.fase_vuelo < 8:
             self.publish_trajectory_setpoint()
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DespegueYReturnHome()
+    node = DespegueYAterrizajeVertical()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

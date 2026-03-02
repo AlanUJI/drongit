@@ -33,6 +33,7 @@ setup(
             'voxl_offboard_figure8 = px4_offboard.voxl_offboard_figure8:main',
             'despegue = px4_offboard.despegue_normal:main',
             'despegue_y_return_home = px4_offboard.despegue_y_return_home:main',
+            'despegue_aterrizar = px4_offboard.despegue_y_aterrizar:main',
         ],
     },
 )
