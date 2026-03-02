@@ -35,6 +35,7 @@ setup(
             'despegue_y_return_home = px4_offboard.despegue_y_return_home:main',
             'despegue_aterrizar = px4_offboard.despegue_y_aterrizar:main',
             'first_mission = px4_offboard.first_mission:main',
+            'second_mission = px4_offboard.second_mission:main',
         ],
     },
 )
