@@ -69,7 +69,7 @@ class DespegueYMantener(Node):
     def publish_trajectory_setpoint(self, x, y, z):
         msg = TrajectorySetpoint()
         msg.position = [float(x), float(y), float(z)]
-        # SOLUCIÓN 1: Evitar que el dron gire sobre sí mismo
+        # Evitar que el dron gire sobre sí mismo
         msg.yaw = float("nan") 
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
@@ -119,22 +119,24 @@ class DespegueYMantener(Node):
                 self.fase_vuelo = 3
                 self.counter = 0
 
-        # FASE 3: Estabilización ACUMULATIVA en suelo
+        # FASE 3: Estabilización ACUMULATIVA en suelo (Empujando hacia abajo)
         elif self.fase_vuelo == 3:
-            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
+            # ENGAÑO: Le decimos que vaya 20 cm bajo el suelo para forzar el ralentí sin elevarse
+            self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z + 0.20)
             
-            # SOLUCIÓN 2: Solo sumamos si es bueno, NO reiniciamos si es malo.
+            # Solo sumamos si es bueno, NO reiniciamos si es malo.
             if self.odom_quality >= 50:
                 self.counter += 1
                 if self.counter % 10 == 0:
                     self.get_logger().info(f'Acumulando... Calidad VIO: {self.odom_quality}% ({self.counter/10:.0f}/5 seg)')
             else:
-                # Si baja la calidad, simplemente informamos, pero no borramos el progreso
                 self.get_logger().debug(f'Pausa en VIO ({self.odom_quality}%). Esperando mejora...')
 
             # Despegamos cuando hayamos sumado 50 ciclos (5 segundos) en total
             if self.counter >= 50: 
                 self.get_logger().info('¡Validación VIO exitosa! Iniciando ascenso a 50cm...')
+                # Resetear el setpoint_z al nivel del suelo real antes de subir
+                self.setpoint_z = self.home_z 
                 self.fase_vuelo = 4
 
         # FASE 4: Ascenso suave y mantenimiento
