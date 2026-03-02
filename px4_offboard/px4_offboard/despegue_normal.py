@@ -31,7 +31,7 @@ class DespegueYMantener(Node):
         self.home_z = 0.0
         
         self.odom_received = False
-        self.odom_quality = 0  # <--- NUEVA VARIABLE PARA LA CALIDAD
+        self.odom_quality = 0
         self.fase_vuelo = 0
         self.counter = 0
         
@@ -53,8 +53,6 @@ class DespegueYMantener(Node):
         self.current_y = float(msg.position[1])
         self.current_z = float(msg.position[2])
         
-        # Extraemos la calidad de VIO (0 a 100)
-        # Usamos try/except por si la versión de px4_msgs no lo incluye, evitar que crashee
         try:
             self.odom_quality = msg.quality
         except AttributeError:
@@ -71,7 +69,8 @@ class DespegueYMantener(Node):
     def publish_trajectory_setpoint(self, x, y, z):
         msg = TrajectorySetpoint()
         msg.position = [float(x), float(y), float(z)]
-        msg.yaw = 0.0
+        # SOLUCIÓN 1: Evitar que el dron gire sobre sí mismo
+        msg.yaw = float("nan") 
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
 
@@ -116,27 +115,24 @@ class DespegueYMantener(Node):
             if self.arming_state != 2:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
             else:
-                self.get_logger().info('Confirmado: Motores armados. Iniciando validación de VIO en suelo...')
+                self.get_logger().info('Confirmado: Motores armados. Iniciando validación acumulativa de VIO...')
                 self.fase_vuelo = 3
                 self.counter = 0
 
-        # FASE 3: Estabilización INTELIGENTE en suelo
+        # FASE 3: Estabilización ACUMULATIVA en suelo
         elif self.fase_vuelo == 3:
             self.publish_trajectory_setpoint(self.home_x, self.home_y, self.home_z)
             
-            # Condición de seguridad: VIO superior al 50%
+            # SOLUCIÓN 2: Solo sumamos si es bueno, NO reiniciamos si es malo.
             if self.odom_quality >= 50:
                 self.counter += 1
-                # Imprimir mensaje cada 1 segundo (10 ciclos)
                 if self.counter % 10 == 0:
-                    self.get_logger().info(f'Estabilizando... Calidad VIO: {self.odom_quality}% ({self.counter/10:.0f}/5 seg)')
+                    self.get_logger().info(f'Acumulando... Calidad VIO: {self.odom_quality}% ({self.counter/10:.0f}/5 seg)')
             else:
-                # Si la calidad cae, advertimos y REINICIAMOS el contador
-                if self.counter > 0:
-                    self.get_logger().warn(f'¡Caída VIO detectada! Calidad: {self.odom_quality}%. Reiniciando estabilización.')
-                self.counter = 0 
+                # Si baja la calidad, simplemente informamos, pero no borramos el progreso
+                self.get_logger().debug(f'Pausa en VIO ({self.odom_quality}%). Esperando mejora...')
 
-            # Si logramos 5 segundos CONTINUOS de buena calidad
+            # Despegamos cuando hayamos sumado 50 ciclos (5 segundos) en total
             if self.counter >= 50: 
                 self.get_logger().info('¡Validación VIO exitosa! Iniciando ascenso a 50cm...')
                 self.fase_vuelo = 4
