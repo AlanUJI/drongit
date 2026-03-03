@@ -8,9 +8,9 @@ from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 import subprocess
 import threading
 
-class MisionInspeccionPOI(Node):
+class MisionInspeccionPrecisa(Node):
     def __init__(self):
-        super().__init__('mision_inspeccion_poi')
+        super().__init__('mision_inspeccion_precisa')
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -43,9 +43,11 @@ class MisionInspeccionPOI(Node):
         self.sp_z = 0.0
         self.sp_yaw = 0.0 
         
-        # Coordenadas del objeto a inspeccionar
+        # Variables de la geometría de inspección
         self.center_x = 0.0
         self.center_y = 0.0
+        self.entry_x = 0.0
+        self.entry_y = 0.0
         
         self.odom_received = False
         self.real_qvio_quality = 0   
@@ -59,9 +61,9 @@ class MisionInspeccionPOI(Node):
         self.altitude_step = 0.01     
         self.velocidad_horizontal = 0.30 
         self.velocidad_descenso = 0.2   
-        self.velocidad_angular = 0.15  # Velocidad de giro (Radianes por segundo)
+        self.velocidad_angular = 0.15  # Velocidad de la órbita
+        self.radio_orbita = 0.50       # Queremos que la órbita sea de 50 cm
         
-        self.radio_orbita = 0.0
         self.orbit_angle = 0.0
         self.orbit_accumulated = 0.0
 
@@ -69,7 +71,7 @@ class MisionInspeccionPOI(Node):
         self.qvio_thread.start()
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
-        self.get_logger().info('Nodo Inspección POI iniciado. Esperando OK de VIO...')
+        self.get_logger().info('Nodo Inspección Avanzado iniciado. Esperando OK de VIO...')
 
     def qvio_monitor_worker(self):
         try:
@@ -180,57 +182,57 @@ class MisionInspeccionPOI(Node):
                 self.sp_z -= self.altitude_step 
             else:
                 self.sp_z = target_z
-                self.get_logger().info('¡1 metro de altura alcanzado! Estabilizando...')
+                self.get_logger().info('¡1 metro de altura alcanzado! Calculando ruta al objeto...')
                 self.fase_vuelo = 5
                 self.counter = 0
 
-        # FASE 5: Estabilización post-ascenso
+        # FASE 5: Cálculo de la ruta de acercamiento
         elif self.fase_vuelo == 5:
             self.counter += 1
             if self.counter >= 30: 
-                self.get_logger().info('Iniciando avance de 1 metro hacia delante...')
+                # El objeto está a 240 cm (2.4m) delante y 118 cm (1.18m) a la izquierda respecto al origen.
+                offset_fwd = 2.40
+                offset_left = 1.18
+                
+                # 1. Coordenadas absolutas del objeto (POI)
+                self.center_x = self.home_x + (offset_fwd * math.cos(self.home_yaw)) + (offset_left * math.sin(self.home_yaw))
+                self.center_y = self.home_y + (offset_fwd * math.sin(self.home_yaw)) - (offset_left * math.cos(self.home_yaw))
+                
+                # 2. Ángulo de la línea recta desde el origen hasta el objeto
+                angle_home_to_poi = math.atan2(self.center_y - self.home_y, self.center_x - self.home_x)
+                
+                # 3. Punto de entrada (50 cm antes de llegar al objeto en esa misma línea)
+                self.entry_x = self.center_x - (self.radio_orbita * math.cos(angle_home_to_poi))
+                self.entry_y = self.center_y - (self.radio_orbita * math.sin(angle_home_to_poi))
+                
+                self.get_logger().info('Acercándose al objetivo (hasta quedar a 50cm)...')
                 self.fase_vuelo = 6
 
-        # FASE 6: Avance de 1 metro
+        # FASE 6: Vuelo de aproximación al punto de entrada
         elif self.fase_vuelo == 6:
-            # Calculamos 1m hacia el frente usando el ángulo de despegue
-            target_x = self.home_x + (1.0 * math.cos(self.home_yaw))
-            target_y = self.home_y + (1.0 * math.sin(self.home_yaw))
-            
-            dist_x = target_x - self.sp_x
-            dist_y = target_y - self.sp_y
+            dist_x = self.entry_x - self.sp_x
+            dist_y = self.entry_y - self.sp_y
             distancia_restante = math.hypot(dist_x, dist_y)
             paso = self.velocidad_horizontal * self.dt
 
             if distancia_restante > 0.05:
                 self.sp_x += (dist_x / distancia_restante) * paso
                 self.sp_y += (dist_y / distancia_restante) * paso
+                # Hacemos que el dron mire al objeto mientras se acerca a él
+                self.sp_yaw = math.atan2(self.center_y - self.sp_y, self.center_x - self.sp_x)
             else:
-                self.sp_x = target_x 
-                self.sp_y = target_y
-                self.get_logger().info('¡Avance completado! Calculando coordenadas del objeto (POI)...')
+                self.sp_x = self.entry_x 
+                self.sp_y = self.entry_y
+                self.get_logger().info('¡Punto de entrada alcanzado! Preparando órbita...')
                 self.fase_vuelo = 7
 
-        # FASE 7: Cálculo del Objetivo Desplazado (POI)
+        # FASE 7: Inicialización de la Órbita
         elif self.fase_vuelo == 7:
-            # El objeto está a 1.4m delante y 1.08m a la izquierda respecto a DONDE ESTAMOS AHORA.
-            offset_fwd = 1.40
-            offset_left = 1.08
-            
-            # Usamos trigonometría avanzada para hallar las coordenadas absolutas del objeto
-            # El vector 'frente' depende de cos(yaw) y sin(yaw).
-            # El vector 'izquierda' es perpendicular, por lo que cruzamos senos y cosenos.
-            self.center_x = self.sp_x + (offset_fwd * math.cos(self.home_yaw)) + (offset_left * math.sin(self.home_yaw))
-            self.center_y = self.sp_y + (offset_fwd * math.sin(self.home_yaw)) - (offset_left * math.cos(self.home_yaw))
-            
-            # Calculamos a qué distancia matemática está el dron del objeto
-            self.radio_orbita = math.hypot(offset_fwd, offset_left)
-            
-            # Calculamos el ángulo en el que se encuentra el dron ahora mismo respecto a ese objeto
+            # Calculamos en qué ángulo del círculo nos encontramos ahora mismo respecto al POI
             self.orbit_angle = math.atan2(self.sp_y - self.center_y, self.sp_x - self.center_x)
             self.orbit_accumulated = 0.0
             
-            self.get_logger().info(f'¡Objeto fijado! Radio estimado: {self.radio_orbita:.2f}m. Iniciando órbita...')
+            self.get_logger().info(f'Iniciando órbita de 360° a {self.radio_orbita}m de distancia...')
             self.fase_vuelo = 8
 
         # FASE 8: Ejecutar Órbita Continua sobre el POI
@@ -240,18 +242,16 @@ class MisionInspeccionPOI(Node):
                 self.orbit_angle += incremento
                 self.orbit_accumulated += incremento
                 
-                # Deslizamos el dron alrededor del objeto usando seno y coseno
                 self.sp_x = self.center_x + (self.radio_orbita * math.cos(self.orbit_angle))
                 self.sp_y = self.center_y + (self.radio_orbita * math.sin(self.orbit_angle))
                 
-                # Giramos la cámara (Yaw) para mirar siempre al objeto
                 self.sp_yaw = math.atan2(self.center_y - self.sp_y, self.center_x - self.sp_x)
                 
             else:
                 self.get_logger().info('¡Escaneo 360° completado! Iniciando RTH...')
                 self.fase_vuelo = 9
 
-        # FASE 9: RTH Horizontal (Regreso al 0,0)
+        # FASE 9: RTH Horizontal (Regreso al origen 0,0)
         elif self.fase_vuelo == 9:
             dist_x = self.home_x - self.sp_x
             dist_y = self.home_y - self.sp_y
@@ -262,11 +262,13 @@ class MisionInspeccionPOI(Node):
             if distancia_total > 0.1: 
                 self.sp_x += (dist_x / distancia_total) * paso
                 self.sp_y += (dist_y / distancia_total) * paso
+                # Opcional: Que mire hacia casa mientras vuelve
+                self.sp_yaw = math.atan2(self.home_y - self.sp_y, self.home_x - self.sp_x)
             else:
                 self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical...')
                 self.sp_x = self.home_x
                 self.sp_y = self.home_y
-                self.sp_yaw = self.home_yaw # Restauramos el rumbo inicial
+                self.sp_yaw = self.home_yaw # Restauramos el rumbo inicial de despegue
                 self.fase_vuelo = 10
 
         # FASE 10: Descenso Vertical a 10cm
@@ -291,7 +293,7 @@ class MisionInspeccionPOI(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MisionInspeccionPOI()
+    node = MisionInspeccionPrecisa()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
