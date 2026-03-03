@@ -57,7 +57,7 @@ class MisionInspeccionPrecisa(Node):
         
         # Parámetros de la Misión
         self.dt = 0.1                 
-        self.target_altitude = -1.0   # Altura de 1 metro
+        self.target_altitude = -0.5  # Altura de medio metro
         self.altitude_step = 0.01     
         self.velocidad_horizontal = 0.30 
         self.velocidad_descenso = 0.2   
