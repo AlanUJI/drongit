@@ -49,14 +49,14 @@ class MisionOrbita(Node):
         self.counter = 0
         self.print_counter = 0
         
-        # Parámetros de la Órbita
+        # Parámetros de la Órbita y el RTH
         self.dt = 0.1                 
-        self.target_altitude = -1.0   # <--- Altura objetivo: 1 metro
+        self.target_altitude = -1.0   # Altura objetivo: 1 metro
         self.altitude_step = 0.01     
         self.velocidad_horizontal = 0.20 
         self.velocidad_descenso = 0.2   
         self.radio_orbita = 1.0       # 1 metro de radio
-        self.velocidad_angular = 0.2  # Radianes por segundo (aprox 31 segs en dar la vuelta)
+        self.velocidad_angular = 0.2  # Radianes por segundo
         
         self.orbit_angle = 0.0
         self.orbit_accumulated = 0.0
@@ -65,7 +65,7 @@ class MisionOrbita(Node):
         self.qvio_thread.start()
 
         self.timer = self.create_timer(self.dt, self.timer_callback)
-        self.get_logger().info('Nodo de Órbita Continua iniciado. Esperando OK de VIO...')
+        self.get_logger().info('Nodo de Órbita Continua + RTH iniciado. Esperando OK de VIO...')
 
     def qvio_monitor_worker(self):
         try:
@@ -107,7 +107,7 @@ class MisionOrbita(Node):
     def publish_trajectory_setpoint(self):
         msg = TrajectorySetpoint()
         msg.position = [float(self.sp_x), float(self.sp_y), float(self.sp_z)]
-        msg.yaw = float(self.sp_yaw) # <--- APLICAMOS EL YAW DINÁMICO
+        msg.yaw = float(self.sp_yaw) # Aplicamos el Yaw dinámico
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher_.publish(msg)
 
@@ -189,7 +189,6 @@ class MisionOrbita(Node):
 
         # FASE 6: Retroceso Vectorial (1 metro hacia atrás)
         elif self.fase_vuelo == 6:
-            # Calculamos 1m en dirección CONTRARIA a donde mira (- radio)
             target_x = self.home_x - (self.radio_orbita * math.cos(self.home_yaw))
             target_y = self.home_y - (self.radio_orbita * math.sin(self.home_yaw))
             
@@ -206,50 +205,63 @@ class MisionOrbita(Node):
                 self.sp_y = target_y
                 self.get_logger().info('¡Posición de órbita alcanzada! Iniciando rotación circular...')
                 
-                # Como fuimos hacia atrás, nuestra posición en la circunferencia está a 180° (pi radianes)
                 self.orbit_angle = self.home_yaw + math.pi
                 self.orbit_accumulated = 0.0
                 self.fase_vuelo = 7
 
         # FASE 7: ÓRBITA CONTINUA CON YAW DINÁMICO
         elif self.fase_vuelo == 7:
-            # Si aún no hemos completado los 360 grados (2*pi radianes)
             if self.orbit_accumulated < 2 * math.pi:
-                # 1. Avanzamos el ángulo un poquito
                 incremento = self.velocidad_angular * self.dt
                 self.orbit_angle += incremento
                 self.orbit_accumulated += incremento
                 
-                # 2. Calculamos las nuevas coordenadas X,Y en el borde del círculo
                 self.sp_x = self.home_x + (self.radio_orbita * math.cos(self.orbit_angle))
                 self.sp_y = self.home_y + (self.radio_orbita * math.sin(self.orbit_angle))
                 
-                # 3. Forzamos al dron a que apunte su morro hacia el origen (home)
-                # La función atan2(destino - origen) nos da el ángulo exacto hacia allá
                 self.sp_yaw = math.atan2(self.home_y - self.sp_y, self.home_x - self.sp_x)
                 
             else:
-                self.get_logger().info('¡Órbita de 360° completada! Iniciando descenso vertical...')
+                self.get_logger().info('¡Órbita de 360° completada! Iniciando Return To Home...')
                 self.fase_vuelo = 8
 
-        # FASE 8: Descenso Vertical a 10cm
+        # FASE 8: RETURN TO HOME HORIZONTAL AL ORIGEN (0,0,0)
         elif self.fase_vuelo == 8:
+            dist_x = self.home_x - self.sp_x
+            dist_y = self.home_y - self.sp_y
+            distancia_total = math.hypot(dist_x, dist_y)
+
+            paso = self.velocidad_horizontal * self.dt 
+
+            if distancia_total > 0.1: 
+                self.sp_x += (dist_x / distancia_total) * paso
+                self.sp_y += (dist_y / distancia_total) * paso
+            else:
+                self.get_logger().info('¡Origen alcanzado! Iniciando descenso vertical a 10 cm...')
+                self.sp_x = self.home_x
+                self.sp_y = self.home_y
+                # Devolvemos la orientación a la original para aterrizar igual que como despegó
+                self.sp_yaw = self.home_yaw 
+                self.fase_vuelo = 9
+
+        # FASE 9: Descenso Vertical a 10cm en el Centro
+        elif self.fase_vuelo == 9:
             target_z_descenso = self.home_z - 0.10 
             if self.sp_z < target_z_descenso: 
                 self.sp_z += (self.velocidad_descenso * self.dt)
             if self.current_z >= target_z_descenso:
                 self.sp_z = target_z_descenso
                 self.trigger_auto_land()
-                self.fase_vuelo = 9
+                self.fase_vuelo = 10
 
-        # FASE 9: Esperar desarmado
-        elif self.fase_vuelo == 9:
+        # FASE 10: Esperar desarmado
+        elif self.fase_vuelo == 10:
             if self.arming_state != 2:
-                self.get_logger().info('Misión finalizada a salvo.')
-                self.fase_vuelo = 10 
+                self.get_logger().info('Misión finalizada a salvo en el punto de despegue.')
+                self.fase_vuelo = 11 
             return 
 
-        if self.fase_vuelo < 10:
+        if self.fase_vuelo < 11:
             self.publish_trajectory_setpoint()
 
 def main(args=None):
