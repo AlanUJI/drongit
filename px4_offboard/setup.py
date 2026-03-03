@@ -37,6 +37,7 @@ setup(
             'first_mission = px4_offboard.first_mission:main',
             'second_mission = px4_offboard.second_mission:main',
             'third_mission = px4_offboard.third_mission:main',
+            'fourth_mission = px4_offboard.fourth_mission:main',
         ],
     },
 )
