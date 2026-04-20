@@ -7,22 +7,29 @@ from nav_msgs.msg import Odometry
 class TraductorOdom(Node):
     def __init__(self):
         super().__init__('traductor_odom')
-        # ¡EL TRUCO ESTÁ AQUÍ! Añadimos qos_profile_sensor_data (Best Effort)
+        # --- ODOMETRÍA PX4 (Músculos) ---
         self.sub = self.create_subscription(
             VehicleOdometry, 
             '/fmu/out/vehicle_odometry', 
             self.listener_callback, 
             qos_profile_sensor_data)
         
-        # El publicador hacia RViz sí va en modo normal (Reliable)
         self.pub = self.create_publisher(Odometry, '/odom_rviz', 10)
+
+        # --- ODOMETRÍA VOXL (Cerebro) ---
+        self.sub_voxl = self.create_subscription(
+            Odometry,
+            '/vvhub_body_wrt_fixed/odom',
+            self.voxl_callback,
+            qos_profile_sensor_data)
+
+        self.pub_voxl = self.create_publisher(Odometry, '/odom_voxl_rviz', 10)
 
     def listener_callback(self, msg):
         out = Odometry()
         out.header.frame_id = "rviz_world"
         out.child_frame_id = "base_link"
         
-        # Le ponemos la hora del sistema para que RViz no lo descarte
         out.header.stamp = self.get_clock().now().to_msg()
         
         # Convertimos las coordenadas espaciales (NED a ENU)
@@ -31,12 +38,19 @@ class TraductorOdom(Node):
         out.pose.pose.position.z = float(-msg.position[2]) # Arriba
         
         self.pub.publish(out)
-        print("Traduciendo frame de odometría...", end="\r")
+        print("Traduciendo frames de odometría (PX4 + VOXL)...", end="\r")
+
+    def voxl_callback(self, msg):
+        # Corregimos el frame_id que viene vacío en el rosbag para que RViz lo sitúe
+        msg.header.frame_id = "rviz_world"
+        msg.header.stamp = self.get_clock().now().to_msg()
+        
+        self.pub_voxl.publish(msg)
 
 def main():
     rclpy.init()
     node = TraductorOdom()
-    print("Traductor funcionando en modo Best Effort. Enviando trayectoria a /odom_rviz...")
+    print("Traductor funcionando. Enviando PX4 a /odom_rviz y VOXL a /odom_voxl_rviz...")
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
